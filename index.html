@@ -1,0 +1,1068 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Headroom · Monitor</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  theme: { extend: { fontFamily: { mono: ['"IBM Plex Mono"', 'ui-monospace', 'monospace'] } } }
+}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+* { font-family: 'Inter', sans-serif; }
+.mono { font-family: 'IBM Plex Mono', monospace; }
+.nav-item { display:flex; align-items:center; gap:10px; padding:7px 12px; border-radius:8px; font-size:13px; font-weight:500; color:#94a3b8; cursor:pointer; transition:all .15s; text-decoration:none; }
+.nav-item:hover { background:#1e293b; color:#e2e8f0; }
+.nav-item.active { background:#2563eb; color:#fff; }
+.nav-item .ep { font-family:'IBM Plex Mono',monospace; font-size:10px; opacity:.65; margin-left:auto; }
+.nav-group { font-size:10px; font-weight:700; letter-spacing:.1em; text-transform:uppercase; color:#475569; padding:8px 12px 4px; margin-top:8px; }
+@keyframes pulse-dot { 0%,100%{opacity:1;transform:scale(1)} 50%{opacity:.4;transform:scale(.7)} }
+.pulse-ok  { animation: pulse-dot 2s ease-in-out infinite; }
+@keyframes spin { to { transform:rotate(360deg) } }
+.loading-spin { animation: spin 1s linear infinite; }
+.metric-bar { height:4px; background:#e2e8f0; border-radius:9999px; overflow:hidden; }
+.metric-bar-fill { height:100%; border-radius:9999px; transition:width .5s ease; }
+</style>
+</head>
+<body class="h-full flex bg-gray-50 antialiased" style="font-family:'Inter',sans-serif">
+
+<!-- ═══ SIDEBAR ═══ -->
+<aside class="w-56 bg-slate-900 flex flex-col h-screen sticky top-0 flex-shrink-0">
+
+  <!-- Logo -->
+  <div class="px-4 pt-5 pb-4 border-b border-slate-800">
+    <div class="flex items-center gap-2.5 mb-3">
+      <div class="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center flex-shrink-0">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5" stroke-linecap="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+      </div>
+      <div>
+        <div class="text-white font-semibold text-sm leading-none">Headroom</div>
+        <div class="text-slate-500 text-xs leading-none mt-0.5">Monitor</div>
+      </div>
+    </div>
+    <div class="mono text-xs text-slate-500 truncate" id="sb-proxy-url">127.0.0.1:8787</div>
+  </div>
+
+  <!-- Live badge -->
+  <div class="px-4 py-2.5 border-b border-slate-800">
+    <div id="live-pill" class="flex items-center gap-2 text-xs font-semibold text-amber-400">
+      <span class="w-2 h-2 rounded-full bg-current pulse-ok"></span>
+      <span id="live-text">Connecting…</span>
+    </div>
+  </div>
+
+  <!-- Nav -->
+  <nav class="flex-1 px-3 py-2 overflow-y-auto" id="sidebar-nav"></nav>
+
+  <!-- Controls -->
+  <div class="px-4 py-4 border-t border-slate-800 space-y-3">
+    <div class="flex items-center gap-2">
+      <span class="text-slate-500 text-xs">every</span>
+      <input id="iv-in" type="number" value="5" min="1" max="999"
+        class="w-10 bg-slate-800 border border-slate-700 text-white mono text-xs rounded px-1.5 py-1 text-center focus:outline-none focus:border-blue-500">
+      <span class="text-slate-500 text-xs">s</span>
+      <button id="toggle-btn" onclick="toggleAuto()"
+        class="ml-auto text-xs font-medium px-2.5 py-1 rounded bg-emerald-900/60 text-emerald-400 border border-emerald-800 hover:bg-emerald-800 transition-colors">⏸</button>
+    </div>
+    <button onclick="doRefresh()"
+      class="w-full text-xs font-semibold py-1.5 rounded bg-blue-600 hover:bg-blue-700 text-white transition-colors">
+      ↺ Refresh Now
+    </button>
+    <div class="mono text-xs text-slate-600 truncate" id="last-upd">—</div>
+  </div>
+</aside>
+
+<!-- ═══ MAIN ═══ -->
+<div class="flex-1 flex flex-col overflow-hidden">
+
+  <!-- Top bar -->
+  <header class="bg-white border-b border-gray-200 px-6 h-14 flex items-center gap-3 flex-shrink-0">
+    <h1 class="text-sm font-semibold text-gray-800" id="page-title">Overview</h1>
+    <div class="flex items-center gap-1.5 ml-2" id="page-badges"></div>
+  </header>
+
+  <!-- Content -->
+  <main class="flex-1 overflow-y-auto p-6" id="content">
+    <div class="flex items-center justify-center h-full text-gray-400 text-sm">Loading…</div>
+  </main>
+</div>
+
+<script>
+// ═══ CONFIG & STATE ═══
+const BASE    = '/api';
+const cache   = {};       // { path: { data, ok, status, ts } }
+const charts  = {};       // Chart.js instances keyed by ID
+let view      = 'overview';
+let autoRef   = true;
+let ivMs      = 5000;
+let timer     = null;
+
+// ═══ NAV DEFINITION ═══
+const NAV = [
+  { id:'overview', label:'Overview',    ep:null,             group:null },
+  { id:'livez',    label:'Liveness',    ep:'/livez',         group:'Status' },
+  { id:'readyz',   label:'Readiness',   ep:'/readyz',        group:null },
+  { id:'health',   label:'Health',      ep:'/health',        group:null },
+  { id:'stats',    label:'Statistics',  ep:'/stats',         group:'Analytics' },
+  { id:'history',  label:'History',     ep:'/stats-history', group:null },
+  { id:'metrics',  label:'Prometheus',  ep:'/metrics',       group:null },
+];
+
+// ═══ DOM HELPERS ═══
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+function setContent(html) { $('content').innerHTML = html; }
+
+function dig(obj, path) {
+  if (!obj || !path) return undefined;
+  return path.split('.').reduce((o,k) => o?.[k], obj);
+}
+function pick(obj, ...paths) {
+  for (const p of paths) { const v = dig(obj,p); if (v != null) return v; }
+  return null;
+}
+
+// ═══ FORMAT ═══
+const fmtTokens = n => {
+  if (n == null || !isFinite(n)) return '—';
+  if (Math.abs(n) >= 1e6) return (n/1e6).toFixed(2)+'M';
+  if (Math.abs(n) >= 1e3) return (n/1e3).toFixed(1)+'K';
+  return n.toLocaleString();
+};
+const fmtNum = n => {
+  if (n == null || !isFinite(n)) return '—';
+  if (Math.abs(n) >= 1e9) return (n/1e9).toFixed(2)+'B';
+  if (Math.abs(n) >= 1e6) return (n/1e6).toFixed(2)+'M';
+  if (Math.abs(n) >= 1e3) return (n/1e3).toFixed(1)+'K';
+  return String(Math.round(n*100)/100);
+};
+const fmtPct = (n, d=1) => {
+  if (n == null || !isFinite(n)) return '—';
+  return (n > 1 ? n : n*100).toFixed(d)+'%';
+};
+const fmtMs = n => {
+  if (n == null || !isFinite(n)) return '—';
+  return n < 1000 ? n.toFixed(1)+'ms' : (n/1000).toFixed(2)+'s';
+};
+const fmtDur = s => {
+  if (s == null) return '—';
+  s = Math.round(s);
+  if (s < 60) return s+'s';
+  if (s < 3600) return `${Math.floor(s/60)}m ${s%60}s`;
+  if (s < 86400) return `${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`;
+  return `${Math.floor(s/86400)}d ${Math.floor((s%86400)/3600)}h`;
+};
+const fmtUSD = n => {
+  if (n == null || !isFinite(n)) return '—';
+  return n < 0.001 ? '<$0.001' : '$'+n.toFixed(4);
+};
+const humanize = s => s.replace(/([A-Z])/g,' $1').replace(/_/g,' ').replace(/\b\w/g,c=>c.toUpperCase()).trim();
+
+// ═══ UI COMPONENTS ═══
+const OK_W  = new Set(['ok','okay','healthy','up','running','alive','ready','true','pass','passing','loaded','enabled','available']);
+const ERR_W = new Set(['error','unhealthy','down','dead','fail','failing','false','disabled','missing','critical','not ready']);
+const WARN_W= new Set(['degraded','warn','warning','partial','unknown','pending']);
+
+function statusCls(v) {
+  const s = String(v).toLowerCase().trim();
+  if (OK_W.has(s))   return 'ok';
+  if (ERR_W.has(s))  return 'err';
+  if (WARN_W.has(s)) return 'warn';
+  return null;
+}
+
+const CLS = {
+  ok:   'bg-emerald-50 text-emerald-700 border border-emerald-200',
+  err:  'bg-red-50 text-red-700 border border-red-200',
+  warn: 'bg-amber-50 text-amber-700 border border-amber-200',
+  blue: 'bg-blue-50 text-blue-700 border border-blue-200',
+  gray: 'bg-gray-100 text-gray-500 border border-gray-200',
+};
+
+function badge(text, cls='gray') {
+  return `<span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-semibold ${CLS[cls]||CLS.gray}">${esc(text)}</span>`;
+}
+function autoBadge(v) { return badge(v, statusCls(v)||'gray'); }
+
+function card(title, body, sub='') {
+  return `<div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+    <div class="px-5 py-3 border-b border-gray-100 bg-gray-50/70 flex items-center gap-2">
+      <span class="text-xs font-semibold text-gray-400 uppercase tracking-wider">${title}</span>
+      ${sub?`<span class="text-xs text-gray-400 ml-1">· ${sub}</span>`:''}
+    </div>
+    <div class="p-5">${body}</div>
+  </div>`;
+}
+
+function statCard(label, value, sub='', color='text-blue-600') {
+  return `<div class="bg-white rounded-xl border border-gray-200 shadow-sm p-5 flex flex-col gap-1.5">
+    <span class="text-xs font-semibold text-gray-400 uppercase tracking-wider">${esc(label)}</span>
+    <span class="mono text-2xl font-semibold ${color} leading-none">${esc(String(value))}</span>
+    ${sub?`<span class="text-xs text-gray-400">${esc(String(sub))}</span>`:''}
+  </div>`;
+}
+
+function kv(key, val, valHtml='') {
+  return `<div class="flex items-center justify-between py-2 border-b border-gray-50 last:border-0 gap-4">
+    <span class="text-xs text-gray-400 shrink-0">${esc(humanize(key))}</span>
+    <span class="text-xs font-medium text-gray-700 text-right truncate">${valHtml || esc(String(val))}</span>
+  </div>`;
+}
+
+function kvList(pairs) {
+  return `<div class="divide-y divide-gray-50">${pairs.map(([k,v,vh])=>kv(k,v,vh)).join('')}</div>`;
+}
+
+function bar(pct, color='bg-blue-500') {
+  const w = Math.min(100,Math.max(0,pct||0));
+  return `<div class="metric-bar w-full"><div class="${color} metric-bar-fill" style="width:${w.toFixed(1)}%"></div></div>`;
+}
+
+function errState(msg, hint='') {
+  return `<div class="flex flex-col items-center justify-center py-16 gap-3 text-center">
+    <div class="w-10 h-10 rounded-full bg-red-50 border border-red-100 flex items-center justify-center text-red-500 text-lg font-bold">✕</div>
+    <div class="mono text-sm text-red-600 max-w-sm">${esc(msg)}</div>
+    ${hint?`<div class="text-xs text-gray-400 max-w-sm leading-relaxed">${esc(hint)}</div>`:''}
+  </div>`;
+}
+
+function checkRow(label, obj) {
+  const ok = obj?.ready ?? obj?.available ?? true;
+  const st = obj?.status ?? (ok ? 'healthy' : 'error');
+  const sc = statusCls(st) || (ok?'ok':'err');
+  const icon = sc==='ok' ? '✓' : sc==='err' ? '✕' : '~';
+  const iconCls = sc==='ok' ? 'text-emerald-600 bg-emerald-50' : sc==='err' ? 'text-red-600 bg-red-50' : 'text-amber-600 bg-amber-50';
+  const extra = obj?.backend ? ` · ${obj.backend}` : obj?.source ? ` · ${obj.source}` : '';
+  return `<div class="flex items-center gap-3 p-3 bg-gray-50 rounded-lg border border-gray-100">
+    <div class="w-6 h-6 rounded-full ${iconCls} flex items-center justify-center text-xs font-bold flex-shrink-0">${icon}</div>
+    <div class="flex-1 min-w-0">
+      <div class="text-sm font-medium text-gray-700">${esc(humanize(label))}</div>
+      ${extra?`<div class="text-xs text-gray-400 mono">${esc(extra)}</div>`:''}
+    </div>
+    ${autoBadge(st)}
+  </div>`;
+}
+
+// ═══ SIDEBAR RENDER ═══
+function renderSidebar() {
+  let html = '';
+  let lastGroup = null;
+  for (const item of NAV) {
+    if (item.group && item.group !== lastGroup) {
+      html += `<div class="nav-group">${item.group}</div>`;
+      lastGroup = item.group;
+    }
+    const isActive = view === item.id;
+    const activeCls = isActive ? ' active' : '';
+    const epHtml = item.ep ? `<span class="ep mono">${item.ep}</span>` : '';
+    html += `<div class="nav-item${activeCls}" onclick="navigate('${item.id}')">${esc(item.label)}${epHtml}</div>`;
+  }
+  $('sidebar-nav').innerHTML = html;
+}
+
+// ═══ LIVE PILL ═══
+function setLive(state) { // 'ok'|'err'|'connecting'
+  const el = $('live-pill');
+  const txt = $('live-text');
+  if (!el) return;
+  const map = {
+    ok:         ['text-emerald-400','Live'],
+    err:        ['text-red-400','Unreachable'],
+    connecting: ['text-amber-400','Connecting…'],
+  };
+  const [cls, label] = map[state] || map.connecting;
+  el.className = `flex items-center gap-2 text-xs font-semibold ${cls}`;
+  txt.textContent = label;
+}
+
+// ═══ FETCH & CACHE ═══
+async function get(path) {
+  const r = await fetch(BASE + path, { cache:'no-store' });
+  const ct = r.headers.get('content-type') || '';
+  const isJ = ct.includes('json');
+  const data = isJ ? await r.json() : await r.text();
+  return { ok:r.ok, status:r.status, isJ, data };
+}
+
+async function fetchPath(path) {
+  try {
+    const r = await get(path);
+    cache[path] = { ok:r.ok, status:r.status, data:r.data, isJ:r.isJ, ts:Date.now() };
+    return cache[path];
+  } catch(e) {
+    cache[path] = { ok:false, status:0, data:null, error:e.message, ts:Date.now() };
+    return cache[path];
+  }
+}
+
+// ═══ NAVIGATION & REFRESH ═══
+const VIEW_ENDPOINTS = {
+  overview: ['/livez','/readyz','/stats'],
+  livez:    ['/livez'],
+  readyz:   ['/readyz'],
+  health:   ['/health'],
+  stats:    ['/stats'],
+  history:  ['/stats-history'],
+  metrics:  ['/metrics'],
+};
+
+function navigate(id) {
+  view = id;
+  const def = NAV.find(n=>n.id===id);
+  $('page-title').textContent = def?.label || id;
+  $('page-badges').innerHTML = def?.ep ? `<span class="mono text-xs text-gray-400">${def.ep}</span>` : '';
+  renderSidebar();
+  doRefresh();
+}
+
+async function doRefresh() {
+  const paths = VIEW_ENDPOINTS[view] || [];
+  await Promise.all(paths.map(p => fetchPath(p)));
+  renderView();
+  const liveCache = cache['/livez'];
+  if (liveCache) setLive(liveCache.ok ? 'ok' : 'err');
+  $('last-upd').textContent = new Date().toLocaleTimeString();
+}
+
+function renderView() {
+  destroyAllCharts();
+  switch(view) {
+    case 'overview': viewOverview(); break;
+    case 'livez':    viewLivez();    break;
+    case 'readyz':   viewReadyz();   break;
+    case 'health':   viewHealth();   break;
+    case 'stats':    viewStats();    break;
+    case 'history':  viewHistory();  break;
+    case 'metrics':  viewMetrics();  break;
+  }
+}
+
+// ═══ AUTO-REFRESH ═══
+function schedNext() {
+  if (timer) clearTimeout(timer);
+  if (!autoRef) return;
+  timer = setTimeout(() => doRefresh().then(schedNext), ivMs);
+}
+function toggleAuto() {
+  autoRef = !autoRef;
+  const btn = $('toggle-btn');
+  btn.textContent = autoRef ? '⏸' : '▶';
+  btn.className = autoRef
+    ? 'ml-auto text-xs font-medium px-2.5 py-1 rounded bg-emerald-900/60 text-emerald-400 border border-emerald-800 hover:bg-emerald-800 transition-colors'
+    : 'ml-auto text-xs font-medium px-2.5 py-1 rounded bg-amber-900/60 text-amber-400 border border-amber-800 hover:bg-amber-800 transition-colors';
+  if (autoRef) doRefresh().then(schedNext);
+  else if (timer) { clearTimeout(timer); timer = null; }
+}
+$('iv-in').addEventListener('change', function() {
+  const v = parseInt(this.value);
+  if (v >= 1) { ivMs = v*1000; if (autoRef) schedNext(); }
+});
+
+// ═══ CHART HELPERS ═══
+function destroyAllCharts() {
+  Object.values(charts).forEach(c => { try { c.destroy(); } catch(e){} });
+  Object.keys(charts).forEach(k => delete charts[k]);
+}
+
+function makeChart(id, config) {
+  const ctx = $(id);
+  if (!ctx) return;
+  if (charts[id]) { try { charts[id].destroy(); } catch(e){} }
+  charts[id] = new Chart(ctx, config);
+}
+
+const BLUE_GRADIENT = ctx => {
+  const g = ctx.createLinearGradient(0,0,0,ctx.canvas.height);
+  g.addColorStop(0,'rgba(37,99,235,.15)');
+  g.addColorStop(1,'rgba(37,99,235,0)');
+  return g;
+};
+
+// ═══ VIEW: OVERVIEW ═══
+function viewOverview() {
+  const ls = cache['/livez']  || {};
+  const rs = cache['/readyz'] || {};
+  const ss = cache['/stats']  || {};
+  const d  = ss.data || {};
+
+  // Extract key metrics
+  const summaryDisplay = dig(d,'summary.display') || '';
+  const tokensSaved  = pick(d,'tokens.saved','tokens_saved','savings.by_layer.compression.all_layers_tokens');
+  const savingsPct   = pick(d,'tokens.savings_percent','tokens.all_layers_savings_percent','savings_percent');
+  const activePct    = pick(d,'tokens.active_savings_percent');
+  const reqTotal     = pick(d,'requests.total','total_requests','summary.by_request.total');
+  const reqCached    = pick(d,'requests.cached','cached_requests');
+  const costSaved    = pick(d,'cost.savings_usd');
+  const costTotal    = pick(d,'cost.total_cost_usd');
+  const overheadAvg  = pick(d,'overhead.average_ms');
+  const latAvg       = pick(d,'latency.average_ms');
+  const ccrEntries   = pick(d,'compression.ccr_entries');
+  const ccrRetr      = pick(d,'compression.ccr_retrievals');
+  const feedbackRate = pick(d,'feedback_loop.global_retrieval_rate','telemetry.global_retrieval_rate');
+
+  // Strategy data
+  const byStrategy    = d.compressions_by_strategy || dig(d,'summary.by_transform') || {};
+  const tokByStrategy = d.tokens_saved_by_strategy || {};
+  const stratTotal    = Object.values(byStrategy).reduce((a,b)=>a+b,0) || 1;
+
+  const strategyNames = {
+    smart_crusher: 'SmartCrusher',
+    code_compressor: 'CodeCompressor',
+    kompress_base: 'Kompress-base',
+    llmlingua: 'LLMLingua',
+  };
+
+  const livez = ls.ok;
+  const readyz = rs.ok;
+
+  // Status strip
+  const statusStrip = `<div class="flex items-center gap-3 flex-wrap">
+    <div class="flex items-center gap-2 px-3 py-1.5 rounded-lg border ${livez?'border-emerald-200 bg-emerald-50':'border-red-200 bg-red-50'}">
+      <span class="w-2 h-2 rounded-full ${livez?'bg-emerald-500 pulse-ok':'bg-red-500'}"></span>
+      <span class="text-xs font-semibold ${livez?'text-emerald-700':'text-red-700'}">Liveness ${livez?'OK':'DOWN'}</span>
+    </div>
+    <div class="flex items-center gap-2 px-3 py-1.5 rounded-lg border ${readyz?'border-emerald-200 bg-emerald-50':'border-red-200 bg-red-50'}">
+      <span class="w-2 h-2 rounded-full ${readyz?'bg-emerald-500 pulse-ok':'bg-red-500'}"></span>
+      <span class="text-xs font-semibold ${readyz?'text-emerald-700':'text-red-700'}">Readiness ${readyz?'READY':'NOT READY'}</span>
+    </div>
+    ${activePct!=null?`<div class="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-blue-200 bg-blue-50">
+      <span class="text-xs font-semibold text-blue-700">Active compression: ${fmtPct(activePct)}</span>
+    </div>`:''}
+    ${overheadAvg!=null?`<div class="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-gray-200 bg-gray-50">
+      <span class="text-xs text-gray-500">Overhead <span class="font-semibold text-gray-700 mono">${fmtMs(overheadAvg)}</span></span>
+    </div>`:''}
+  </div>`;
+
+  // Hero banner
+  const heroBanner = summaryDisplay ? `
+    <div class="bg-gradient-to-r from-blue-600 to-blue-700 rounded-xl p-5 mb-6 text-white">
+      <div class="text-xs font-semibold text-blue-200 uppercase tracking-wider mb-1">Session Summary</div>
+      <div class="text-lg font-semibold mono">${esc(summaryDisplay)}</div>
+    </div>` : '';
+
+  // Stat cards
+  const cards4 = `<div class="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+    ${statCard('Tokens Saved', fmtTokens(tokensSaved), savingsPct!=null?fmtPct(savingsPct)+' reduction':'all layers', 'text-blue-600')}
+    ${statCard('Requests', fmtNum(reqTotal), reqCached!=null?`${fmtNum(reqCached)} cache hits`:'', 'text-purple-600')}
+    ${statCard('Cost Saved', fmtUSD(costSaved), costTotal!=null?`of ${fmtUSD(costTotal)} total`:'', 'text-emerald-600')}
+    ${statCard('Avg Latency', fmtMs(latAvg), overheadAvg!=null?`+${fmtMs(overheadAvg)} overhead`:'', 'text-amber-600')}
+  </div>`;
+
+  // Strategy breakdown
+  const strategyRows = Object.entries(byStrategy).map(([k,count]) => {
+    const name = strategyNames[k] || humanize(k);
+    const tokSaved = tokByStrategy[k];
+    const pct = count / stratTotal * 100;
+    return `<div class="space-y-1.5">
+      <div class="flex items-center justify-between text-xs">
+        <span class="font-medium text-gray-700">${esc(name)}</span>
+        <span class="mono text-gray-500">${count} calls${tokSaved?` · ${fmtTokens(tokSaved)} saved`:''}</span>
+      </div>
+      ${bar(pct)}
+    </div>`;
+  });
+
+  // CCR card
+  const ccrCard = (ccrEntries != null) ? `
+    <div class="grid grid-cols-3 gap-3 mt-4">
+      <div class="bg-gray-50 rounded-lg p-3 text-center">
+        <div class="mono text-lg font-semibold text-gray-800">${fmtNum(ccrEntries)}</div>
+        <div class="text-xs text-gray-400 mt-0.5">CCR Entries</div>
+      </div>
+      <div class="bg-gray-50 rounded-lg p-3 text-center">
+        <div class="mono text-lg font-semibold text-gray-800">${fmtNum(ccrRetr)}</div>
+        <div class="text-xs text-gray-400 mt-0.5">Retrievals</div>
+      </div>
+      <div class="bg-gray-50 rounded-lg p-3 text-center ${feedbackRate!=null&&feedbackRate>0.1?'bg-amber-50':''}">
+        <div class="mono text-lg font-semibold ${feedbackRate!=null&&feedbackRate>0.1?'text-amber-600':'text-gray-800'}">${fmtPct(feedbackRate)}</div>
+        <div class="text-xs text-gray-400 mt-0.5">Retrieval Rate</div>
+      </div>
+    </div>` : '';
+
+  // Error state if no stats
+  if (!ss.ok && ss.ts) {
+    setContent(`
+      ${heroBanner}
+      <div class="space-y-6">
+        <div class="mb-4">${statusStrip}</div>
+        ${card('Statistics Unavailable', errState(ss.error||'HTTP '+ss.status,
+          'The headroom proxy is reachable but /stats returned an error. Try refreshing.'))}
+      </div>`);
+    return;
+  }
+
+  setContent(`
+    ${heroBanner}
+    <div class="space-y-6">
+      <div>${statusStrip}</div>
+      ${cards4}
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        ${card('Compression Strategies', strategyRows.length
+          ? `<div class="space-y-4">${strategyRows.join('')}</div>${ccrCard}`
+          : '<div class="text-sm text-gray-400">No compression data yet</div>')}
+        ${card('Live History', `<div style="position:relative;height:160px"><canvas id="ov-hist-chart"></canvas></div>`, 'Tokens saved')}
+      </div>
+    </div>`);
+
+  // History sparkline from stats.savings_history or local history
+  requestAnimationFrame(() => {
+    const hist = d.savings_history || [];
+    if (!hist.length) return;
+    const labels = hist.map(h => {
+      const t = h.timestamp || h.ts;
+      return t ? new Date(t).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}) : '';
+    });
+    const vals = hist.map(h => h.tokens_saved || h.value || 0);
+    makeChart('ov-hist-chart', {
+      type:'line',
+      data:{ labels, datasets:[{
+        data:vals, borderColor:'#2563eb', borderWidth:2, fill:true,
+        backgroundColor: ctx => BLUE_GRADIENT(ctx.chart.ctx),
+        tension:0.4, pointRadius:0, pointHoverRadius:4
+      }]},
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        plugins:{ legend:{display:false}, tooltip:{ callbacks:{ label:c=>` ${fmtTokens(c.parsed.y)} saved` } } },
+        scales:{
+          x:{ grid:{display:false}, ticks:{font:{size:10},maxTicksLimit:8,maxRotation:0} },
+          y:{ grid:{color:'#f3f4f6'}, ticks:{font:{size:10},callback:v=>fmtTokens(v)} }
+        }
+      }
+    });
+  });
+}
+
+// ═══ VIEW: LIVENESS ═══
+function viewLivez() {
+  const c = cache['/livez'] || {};
+  if (c.error) { setContent(errState(c.error,'Cannot reach headroom proxy. Is it running?')); return; }
+  const d = c.data || {};
+  const isJ = c.isJ;
+  const ok = c.ok;
+
+  const data = isJ && typeof d === 'object' ? d : {};
+  const status  = data.status || (ok ? 'healthy' : 'error');
+  const service = data.service || 'headroom-proxy';
+  const version = data.version;
+  const uptime  = data.uptime_seconds;
+  const alive   = data.alive ?? ok;
+  const ts      = data.timestamp;
+
+  const scalars = Object.entries(data).filter(([k,v]) =>
+    !['status','service','version','uptime_seconds','alive','timestamp'].includes(k) && typeof v !== 'object'
+  );
+
+  setContent(`
+    <div class="max-w-lg space-y-4">
+      <div class="bg-white rounded-xl border ${ok?'border-emerald-200':'border-red-200'} shadow-sm p-8 text-center">
+        <div class="w-20 h-20 rounded-full ${ok?'bg-emerald-50 border-2 border-emerald-200':'bg-red-50 border-2 border-red-200'} flex items-center justify-center mx-auto mb-4">
+          <span class="text-3xl font-bold ${ok?'text-emerald-600':'text-red-600'}">${ok?'✓':'✕'}</span>
+        </div>
+        <div class="text-2xl font-bold ${ok?'text-emerald-700':'text-red-700'} mb-1">${ok?'ALIVE':'DOWN'}</div>
+        <div class="mono text-sm text-gray-400">HTTP ${c.status}</div>
+      </div>
+      ${card('Process Info', kvList([
+        ['Service', service],
+        ...(version ? [['Version', version]] : []),
+        ...(uptime  != null ? [['Uptime', fmtDur(uptime)]] : []),
+        ...(alive   != null ? [['Alive', alive, autoBadge(String(alive))]] : []),
+        ...(ts      ? [['Timestamp', new Date(ts).toLocaleString()]] : []),
+        ...scalars.map(([k,v]) => [k, v, autoBadge(v)]),
+      ]))}
+    </div>`);
+}
+
+// ═══ VIEW: READINESS ═══
+function viewReadyz() {
+  const c = cache['/readyz'] || {};
+  if (c.error) { setContent(errState(c.error)); return; }
+  const d    = c.data || {};
+  const ok   = c.ok;
+  const checks  = d.checks || {};
+  const runtime = d.runtime || {};
+  const exec    = runtime.compression_executor || {};
+  const ws      = runtime.websocket_sessions || {};
+  const pre     = runtime.anthropic_pre_upstream || {};
+  const rust    = d.rust_core;
+
+  setContent(`
+    <div class="space-y-5">
+      <!-- Overall status -->
+      <div class="flex items-center gap-4 bg-white rounded-xl border ${ok?'border-emerald-200':'border-red-200'} shadow-sm p-5">
+        <div class="w-12 h-12 rounded-full ${ok?'bg-emerald-50':'bg-red-50'} flex items-center justify-center text-xl font-bold ${ok?'text-emerald-600':'text-red-600'} flex-shrink-0">${ok?'✓':'✕'}</div>
+        <div>
+          <div class="text-base font-semibold ${ok?'text-emerald-700':'text-red-700'}">${ok?'READY':'NOT READY'}</div>
+          <div class="text-sm text-gray-400">${d.service||'headroom-proxy'} ${d.version?'v'+d.version:''} · HTTP ${c.status}</div>
+          ${d.uptime_seconds!=null?`<div class="text-xs text-gray-400 mono mt-0.5">Uptime: ${fmtDur(d.uptime_seconds)}</div>`:''}
+        </div>
+        ${rust?`<div class="ml-auto">${badge('Rust: '+rust, statusCls(rust)||'gray')}</div>`:''}
+      </div>
+
+      <!-- Checks grid -->
+      ${Object.keys(checks).length ? card('Subsystem Checks',
+        `<div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          ${Object.entries(checks).map(([k,v])=>checkRow(k,v)).join('')}
+        </div>`) : ''}
+
+      <!-- Runtime executor -->
+      ${exec.max_workers!=null ? card('Compression Executor', kvList([
+        ['Workers', exec.max_workers],
+        ['In-flight', `${exec.in_flight||0} / ${exec.in_flight_max||'—'}`, `<span class="mono text-xs text-gray-700">${exec.in_flight||0} <span class="text-gray-400">/ ${exec.in_flight_max||'—'}</span></span>`],
+        ['Queued', `${exec.queued||0} / ${exec.queued_max||'—'}`, `<span class="mono text-xs text-gray-700">${exec.queued||0} <span class="text-gray-400">/ ${exec.queued_max||'—'}</span></span>`],
+        ['Run Time (total)', fmtMs(exec.run_seconds_total*1000), `<span class="mono text-xs text-gray-700">${fmtMs((exec.run_seconds_total||0)*1000)}</span>`],
+        ['Max Run Time', fmtMs((exec.run_seconds_max||0)*1000)],
+        ['Source', exec.source||'—'],
+      ])) : ''}
+
+      <!-- WebSocket sessions -->
+      ${ws.active_sessions!=null ? card('WebSocket Sessions', kvList([
+        ['Active Sessions', ws.active_sessions],
+        ['Active Relay Tasks', ws.active_relay_tasks||0],
+      ])) : ''}
+
+      <!-- Anthropic concurrency -->
+      ${pre.enabled ? card('Anthropic Concurrency', kvList([
+        ['Enabled', pre.enabled, autoBadge(String(pre.enabled))],
+        ['Concurrency', pre.resolved_concurrency||'—'],
+        ['Source', pre.source||'—'],
+        ['Acquire Timeout', fmtDur(pre.acquire_timeout_seconds)],
+      ])) : ''}
+    </div>`);
+}
+
+// ═══ VIEW: HEALTH ═══
+function viewHealth() {
+  const c = cache['/health'] || {};
+  if (c.error) { setContent(errState(c.error)); return; }
+  const d  = c.data || {};
+  const ok = c.ok;
+
+  // /health returns simpler shape per docs
+  const status   = d.status || (ok?'healthy':'error');
+  const optimize = d.optimize;
+  const stats    = d.stats || {};
+  const sc       = statusCls(status)||'gray';
+
+  const scalars = Object.entries(d).filter(([k,v]) =>
+    !['status','optimize','stats','checks','runtime','config'].includes(k) && typeof v !== 'object'
+  );
+  const config = d.config || {};
+
+  setContent(`
+    <div class="space-y-5 max-w-2xl">
+      <div class="bg-white rounded-xl border ${sc==='ok'?'border-emerald-200':'border-red-200'} shadow-sm p-6">
+        <div class="flex items-center gap-4">
+          <div class="w-14 h-14 rounded-full ${sc==='ok'?'bg-emerald-50':'bg-red-50'} flex items-center justify-center text-2xl font-bold ${sc==='ok'?'text-emerald-600':'text-red-600'} flex-shrink-0">${sc==='ok'?'✓':'✕'}</div>
+          <div class="flex-1">
+            <div class="text-xl font-bold ${sc==='ok'?'text-emerald-700':'text-red-700'}">${esc(String(status).toUpperCase())}</div>
+            <div class="flex items-center gap-2 mt-1 flex-wrap">
+              ${optimize!=null ? badge(optimize?'Optimization ON':'Optimization OFF', optimize?'ok':'warn') : ''}
+              ${badge('HTTP '+c.status,'gray')}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      ${stats.total_requests!=null || stats.tokens_saved!=null ? card('Quick Stats', `
+        <div class="grid grid-cols-3 gap-3">
+          ${stats.total_requests!=null?`<div class="bg-gray-50 rounded-lg p-3 text-center"><div class="mono text-xl font-semibold text-gray-800">${fmtNum(stats.total_requests)}</div><div class="text-xs text-gray-400 mt-0.5">Requests</div></div>`:''}
+          ${stats.tokens_saved!=null?`<div class="bg-blue-50 rounded-lg p-3 text-center"><div class="mono text-xl font-semibold text-blue-700">${fmtTokens(stats.tokens_saved)}</div><div class="text-xs text-gray-400 mt-0.5">Tokens Saved</div></div>`:''}
+          ${stats.savings_percent!=null?`<div class="bg-emerald-50 rounded-lg p-3 text-center"><div class="mono text-xl font-semibold text-emerald-700">${fmtPct(stats.savings_percent)}</div><div class="text-xs text-gray-400 mt-0.5">Savings</div></div>`:''}
+        </div>`) : ''}
+
+      ${scalars.length ? card('Details', kvList(scalars.map(([k,v]) => [k, v, autoBadge(v)]))) : ''}
+      ${Object.keys(config).length ? card('Config', kvList(
+        Object.entries(config).filter(([,v])=>typeof v!=='object').map(([k,v])=>[k,v,autoBadge(v)])
+      )) : ''}
+    </div>`);
+}
+
+// ═══ VIEW: STATISTICS ═══
+function viewStats() {
+  const c = cache['/stats'] || {};
+  if (c.error) { setContent(errState(c.error)); return; }
+  if (!c.ok) { setContent(errState('HTTP '+c.status)); return; }
+  const d = c.data || {};
+
+  // Parse all fields
+  const tok = {
+    saved:       pick(d,'tokens.saved','tokens_saved'),
+    input:       pick(d,'tokens.input','tokens_input'),
+    output:      pick(d,'tokens.output','tokens_output'),
+    savedPct:    pick(d,'tokens.savings_percent','savings_percent'),
+    activePct:   pick(d,'tokens.active_savings_percent'),
+    allPct:      pick(d,'tokens.all_layers_savings_percent'),
+    proxyBefore: pick(d,'tokens.proxy_total_before_compression'),
+  };
+  const req = {
+    total:   pick(d,'requests.total','total_requests'),
+    cached:  pick(d,'requests.cached','cached_requests'),
+    failed:  pick(d,'requests.failed','failed_requests'),
+    rateLim: pick(d,'requests.rate_limited'),
+    byProv:  pick(d,'requests.by_provider'),
+    byModel: pick(d,'requests.by_model'),
+  };
+  const lat = {
+    avg: pick(d,'latency.average_ms'),
+    min: pick(d,'latency.min_ms'),
+    max: pick(d,'latency.max_ms'),
+  };
+  const ovh = { avg: pick(d,'overhead.average_ms'), min: pick(d,'overhead.min_ms'), max: pick(d,'overhead.max_ms') };
+  const ttfb = { avg: pick(d,'ttfb.average_ms'), min: pick(d,'ttfb.min_ms'), max: pick(d,'ttfb.max_ms') };
+  const cost = {
+    total:  pick(d,'cost.total_cost_usd'),
+    saved:  pick(d,'cost.savings_usd'),
+    pct:    pick(d,'cost.savings_percent'),
+    prefix: pick(d,'prefix_cache.totals.net_savings_usd','cost.prefix_cache_cost_usd'),
+    inp:    pick(d,'cost.input_cost_usd'),
+    out:    pick(d,'cost.output_cost_usd'),
+  };
+  const cache_ = {
+    hits:      pick(d,'cache.hits','compression_cache.total_hits'),
+    misses:    pick(d,'cache.misses','compression_cache.total_misses'),
+    hitRate:   pick(d,'cache.hit_rate','compression_cache.hit_rate'),
+    entries:   pick(d,'cache.entries','compression_cache.total_entries'),
+    tokSaved:  pick(d,'cache.tokens_saved','compression_cache.total_tokens_saved'),
+  };
+  const ccr = {
+    entries:   pick(d,'compression.ccr_entries'),
+    max:       pick(d,'compression.ccr_max_entries'),
+    origToks:  pick(d,'compression.original_tokens_cached'),
+    compToks:  pick(d,'compression.compressed_tokens_cached'),
+    retrievals:pick(d,'compression.ccr_retrievals'),
+  };
+  const fb = {
+    tools:    pick(d,'feedback_loop.tools_tracked'),
+    total:    pick(d,'feedback_loop.total_compressions'),
+    retr:     pick(d,'feedback_loop.total_retrievals'),
+    rate:     pick(d,'feedback_loop.global_retrieval_rate'),
+    highRetr: pick(d,'feedback_loop.tools_with_high_retrieval'),
+  };
+  const byStrat     = d.compressions_by_strategy || dig(d,'summary.by_transform') || {};
+  const tokByStrat  = d.tokens_saved_by_strategy || {};
+  const stratTotal  = Object.values(byStrat).reduce((a,b)=>a+b,0)||1;
+  const maxTokStrat = Math.max(...Object.values(tokByStrat),1);
+
+  const stratNames = { smart_crusher:'SmartCrusher', code_compressor:'CodeCompressor', kompress_base:'Kompress-base', llmlingua:'LLMLingua', cache_aligner:'CacheAligner', intelligent_context:'IntelligentContext' };
+
+  setContent(`
+    <div class="space-y-5">
+
+      <!-- Token Economics -->
+      <div>
+        <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Token Economics</div>
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-3">
+          ${statCard('Tokens Saved',  fmtTokens(tok.saved),  tok.savedPct!=null?fmtPct(tok.savedPct)+' reduction':'', 'text-blue-600')}
+          ${statCard('Active Savings', tok.activePct!=null?fmtPct(tok.activePct):'—', 'on compressible content', 'text-blue-600')}
+          ${statCard('Input',  fmtTokens(tok.input),  'before compression', 'text-gray-600')}
+          ${statCard('Output', fmtTokens(tok.output), 'after compression',  'text-gray-600')}
+        </div>
+        ${tok.proxyBefore!=null?`<div class="bg-blue-50 border border-blue-100 rounded-lg px-4 py-2 text-xs text-blue-700 mono">Before compression: ${fmtTokens(tok.proxyBefore)} → After: ${fmtTokens(tok.output)} · All layers saved: ${fmtPct(tok.allPct)}</div>`:''}
+      </div>
+
+      <!-- Strategy breakdown + chart -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        ${card('By Strategy', Object.keys(byStrat).length ? `
+          <div class="space-y-4">
+            ${Object.entries(byStrat).map(([k,count]) => {
+              const name = stratNames[k]||humanize(k);
+              const ts2  = tokByStrat[k];
+              const pct  = count/stratTotal*100;
+              const tpct = ts2 ? ts2/maxTokStrat*100 : 0;
+              return `<div class="space-y-1.5">
+                <div class="flex justify-between text-xs">
+                  <span class="font-medium text-gray-700">${esc(name)}</span>
+                  <span class="mono text-gray-400">${count} · ${ts2?fmtTokens(ts2)+' saved':'—'}</span>
+                </div>
+                <div class="flex gap-1.5 items-center">
+                  ${bar(pct,'bg-blue-400')}
+                  <span class="mono text-xs text-gray-400 w-8 text-right">${pct.toFixed(0)}%</span>
+                </div>
+              </div>`;
+            }).join('')}
+          </div>` : '<div class="text-sm text-gray-400">No data</div>')}
+        ${card('Strategy Chart', `<div style="position:relative;height:200px"><canvas id="strat-chart"></canvas></div>`)}
+      </div>
+
+      <!-- Requests -->
+      <div>
+        <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Requests</div>
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          ${statCard('Total',       fmtNum(req.total),   '', 'text-gray-700')}
+          ${statCard('Cache Hits',  fmtNum(req.cached),  req.total?fmtPct(req.cached/req.total)+' hit rate':'', 'text-emerald-600')}
+          ${statCard('Failed',      fmtNum(req.failed),  '', req.failed?'text-red-500':'text-gray-500')}
+          ${statCard('Rate Limited',fmtNum(req.rateLim), '', req.rateLim?'text-amber-600':'text-gray-500')}
+        </div>
+        ${req.byProv ? `<div class="mt-3 flex flex-wrap gap-2">
+          ${Object.entries(req.byProv).map(([p,n])=>`<span class="mono text-xs bg-gray-100 text-gray-600 border border-gray-200 px-2 py-1 rounded">${esc(p)}: ${fmtNum(n)}</span>`).join('')}
+        </div>` : ''}
+      </div>
+
+      <!-- Latency & Performance -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+        ${card('Request Latency', kvList([
+          ['Average', fmtMs(lat.avg)],
+          ['Minimum', fmtMs(lat.min)],
+          ['Maximum', fmtMs(lat.max)],
+        ]))}
+        ${card('Headroom Overhead', kvList([
+          ['Average', fmtMs(ovh.avg)],
+          ['Minimum', fmtMs(ovh.min)],
+          ['Maximum', fmtMs(ovh.max)],
+        ]),'subtitle: time spent optimizing')}
+        ${card('Time to First Byte', kvList([
+          ['Average', fmtMs(ttfb.avg)],
+          ['Minimum', fmtMs(ttfb.min)],
+          ['Maximum', fmtMs(ttfb.max)],
+        ]))}
+      </div>
+
+      <!-- Semantic Cache -->
+      ${cache_.hits!=null ? `<div>
+        <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Semantic Cache</div>
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          ${statCard('Hit Rate', fmtPct(cache_.hitRate!=null?cache_.hitRate/100:null),'', 'text-emerald-600')}
+          ${statCard('Hits',    fmtNum(cache_.hits),   '', 'text-gray-700')}
+          ${statCard('Misses',  fmtNum(cache_.misses), '', 'text-gray-500')}
+          ${statCard('Tokens Saved', fmtTokens(cache_.tokSaved), '', 'text-blue-600')}
+        </div>
+      </div>` : ''}
+
+      <!-- Cost -->
+      ${cost.total!=null ? `<div>
+        <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Cost Analysis</div>
+        <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          ${statCard('Total Cost',      fmtUSD(cost.total), '', 'text-gray-700')}
+          ${statCard('Cost Saved',      fmtUSD(cost.saved), cost.pct!=null?fmtPct(cost.pct)+' savings':'', 'text-emerald-600')}
+          ${statCard('Prefix Cache',    fmtUSD(cost.prefix),'KV cache discount', 'text-purple-600')}
+          ${statCard('Est. Without Headroom', fmtUSD((cost.total||0)+(cost.saved||0)), '', 'text-gray-500')}
+        </div>
+      </div>` : ''}
+
+      <!-- CCR & Feedback -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        ${ccr.entries!=null ? card('CCR — Compress-Cache-Retrieve', kvList([
+          ['Cached Originals', `${fmtNum(ccr.entries)} / ${fmtNum(ccr.max)}`, `<span class="mono text-xs text-gray-700">${fmtNum(ccr.entries)}<span class="text-gray-400"> / ${fmtNum(ccr.max)}</span></span>`],
+          ['Original Tokens', fmtTokens(ccr.origToks)],
+          ['Compressed Tokens', fmtTokens(ccr.compToks)],
+          ['Retrievals', ccr.retrievals, `<span class="mono text-xs ${ccr.retrievals>0?'text-amber-600':'text-gray-700'}">${fmtNum(ccr.retrievals)}</span>`],
+        ]),'5-min TTL cache of original content for LLM retrieval') : ''}
+
+        ${fb.tools!=null ? card('Feedback Loop', kvList([
+          ['Tools Tracked', fb.tools],
+          ['Global Retrieval Rate', fmtPct(fb.rate), `<span class="mono text-xs ${fb.rate>0.1?'text-amber-600':'text-emerald-600'}">${fmtPct(fb.rate)}</span>`],
+          ['High-Retrieval Tools', fb.highRetr, `<span class="mono text-xs ${fb.highRetr>0?'text-amber-600':'text-gray-700'}">${fmtNum(fb.highRetr)}</span>`],
+          ['Total Compressions', fb.total],
+          ['Total Retrievals', fb.retr],
+        ]),'Low retrieval rate = compression is not too aggressive') : ''}
+      </div>
+
+    </div>`);
+
+  // Strategy chart
+  requestAnimationFrame(() => {
+    const labels = Object.keys(byStrat).map(k=>stratNames[k]||humanize(k));
+    const vals   = Object.values(byStrat);
+    if (!labels.length) return;
+    makeChart('strat-chart', {
+      type:'doughnut',
+      data:{ labels, datasets:[{ data:vals, backgroundColor:['#2563eb','#7c3aed','#059669','#d97706','#dc2626','#0891b2'], borderWidth:0 }] },
+      options:{
+        responsive:true, maintainAspectRatio:false, cutout:'60%',
+        plugins:{ legend:{ position:'right', labels:{ font:{size:11}, padding:12, boxWidth:10 } } }
+      }
+    });
+  });
+}
+
+// ═══ VIEW: HISTORY ═══
+let histSeries = 'history';
+function viewHistory() {
+  const c = cache['/stats-history'] || {};
+  if (c.error) { setContent(errState(c.error)); return; }
+
+  const d = c.data || {};
+  const arr = Array.isArray(d) ? d : (d.history||d.entries||d.items||d.data||[]);
+  const sess = d.display_session || d.session || null;
+  const periods = d.totals_by_period || {};
+
+  const seriesBtns = ['history','hourly','daily','weekly','monthly'].map(s =>
+    `<button onclick="changeHistSeries('${s}')"
+      class="px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors ${histSeries===s
+        ?'bg-blue-600 text-white'
+        :'bg-white text-gray-500 border border-gray-200 hover:border-gray-300'}">
+      ${s.charAt(0).toUpperCase()+s.slice(1)}
+    </button>`
+  ).join('');
+
+  const sessCards = sess ? Object.entries(sess).filter(([,v])=>typeof v!=='object'&&v!=null).map(([k,v])=>`
+    <div class="bg-gray-50 rounded-lg p-3 text-center border border-gray-100">
+      <div class="mono text-lg font-semibold text-gray-800">${
+        k.includes('percent')||k.includes('ratio') ? fmtPct(v) :
+        k.includes('token') ? fmtTokens(v) :
+        k.includes('second') ? fmtDur(v) :
+        fmtNum(v)
+      }</div>
+      <div class="text-xs text-gray-400 mt-0.5">${humanize(k)}</div>
+    </div>`).join('') : '';
+
+  const periodRows = Object.entries(periods).map(([period, data]) => {
+    if (!data || typeof data !== 'object') return '';
+    const saved = data.tokens_saved??data.total_tokens??null;
+    const pct   = data.savings_percent??null;
+    return `<div class="flex items-center justify-between py-2 border-b border-gray-50 last:border-0">
+      <span class="text-xs font-semibold text-gray-500 uppercase">${period}</span>
+      <div class="flex items-center gap-3">
+        ${saved!=null?`<span class="mono text-xs text-blue-600 font-semibold">${fmtTokens(saved)} saved</span>`:''}
+        ${pct!=null?badge(fmtPct(pct),'blue'):''}
+      </div>
+    </div>`;
+  }).join('');
+
+  setContent(`
+    <div class="space-y-5">
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="text-xs text-gray-400 font-medium">Series:</span>
+        ${seriesBtns}
+      </div>
+
+      ${card('Compression History', `<div style="position:relative;height:240px"><canvas id="hist-chart"></canvas></div>`,
+        arr.length ? arr.length+' data points' : 'No data')}
+
+      ${sessCards ? card('Current Session', `<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">${sessCards}</div>`) : ''}
+      ${periodRows ? card('Period Totals', `<div>${periodRows}</div>`) : ''}
+    </div>`);
+
+  requestAnimationFrame(() => {
+    if (!arr.length) return;
+    const labels = arr.map(h => {
+      const t = h.timestamp||h.time||h.ts;
+      if (!t) return '';
+      const dt = new Date(t);
+      return histSeries==='history'
+        ? dt.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})
+        : dt.toLocaleDateString([],{month:'short',day:'numeric'});
+    });
+    const vals = arr.map(h => h.tokens_saved||h.value||0);
+    makeChart('hist-chart', {
+      type:'line',
+      data:{ labels, datasets:[{
+        label:'Tokens Saved',
+        data:vals,
+        borderColor:'#2563eb', borderWidth:2.5,
+        fill:true,
+        backgroundColor: ctx => BLUE_GRADIENT(ctx.chart.ctx),
+        tension:0.4, pointRadius:arr.length>60?0:3,
+        pointBackgroundColor:'#2563eb', pointBorderColor:'#fff', pointBorderWidth:2,
+        pointHoverRadius:5
+      }]},
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        plugins:{
+          legend:{display:false},
+          tooltip:{ mode:'index', intersect:false, callbacks:{ label:c=>` ${fmtTokens(c.parsed.y)} saved` } }
+        },
+        scales:{
+          x:{ grid:{display:false}, ticks:{font:{size:10},maxTicksLimit:10,maxRotation:0} },
+          y:{ grid:{color:'#f3f4f6'}, ticks:{font:{size:10},callback:v=>fmtTokens(v)} }
+        }
+      }
+    });
+  });
+}
+
+window.changeHistSeries = async (s) => {
+  histSeries = s;
+  await fetchPath('/stats-history?series='+s).then(r => { cache['/stats-history']=r; });
+  viewHistory();
+};
+
+// ═══ VIEW: PROMETHEUS ═══
+function viewMetrics() {
+  const c = cache['/metrics'] || {};
+  if (c.error) { setContent(errState(c.error)); return; }
+
+  const text = c.isJ ? JSON.stringify(c.data,null,2) : (c.data||'');
+  const ms = parseProm(text);
+
+  if (!ms.length) {
+    setContent(`<div class="space-y-3">
+      <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider">${ms.length} metrics</div>
+      <pre class="bg-white border border-gray-200 rounded-xl p-5 text-xs mono text-gray-600 overflow-auto max-h-96 whitespace-pre-wrap">${esc(text)}</pre>
+    </div>`);
+    return;
+  }
+
+  const maxN = Math.max(...ms.map(m=>m.num).filter(n=>isFinite(n)&&n>0),1);
+
+  setContent(`
+    <div class="space-y-3">
+      <div class="text-xs text-gray-400">${ms.length} metric series</div>
+      <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div class="overflow-auto max-h-[70vh]">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="border-b border-gray-200 bg-gray-50/80 sticky top-0">
+                <th class="text-left px-5 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Metric</th>
+                <th class="text-left px-4 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Labels</th>
+                <th class="text-right px-4 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Value</th>
+                <th class="px-4 py-3 text-xs font-semibold text-gray-400 uppercase tracking-wider">Type</th>
+                <th class="px-4 py-3 w-24"></th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-50">
+              ${ms.map(m => {
+                const pct = isFinite(m.num)&&m.num>0 ? Math.min(100,m.num/maxN*100) : 0;
+                return `<tr class="hover:bg-gray-50/80 transition-colors">
+                  <td class="px-5 py-3">
+                    <div class="mono text-xs font-medium text-blue-700">${esc(m.name)}</div>
+                    ${m.help?`<div class="text-xs text-gray-400 italic mt-0.5">${esc(m.help)}</div>`:''}
+                  </td>
+                  <td class="px-4 py-3 mono text-xs text-gray-400">${m.labels||'<span class="text-gray-200">—</span>'}</td>
+                  <td class="px-4 py-3 mono text-xs font-semibold text-blue-600 text-right">${esc(m.value)}</td>
+                  <td class="px-4 py-3">${m.type?badge(m.type,'gray'):''}</td>
+                  <td class="px-4 py-3">
+                    <div class="metric-bar w-20"><div class="metric-bar-fill bg-blue-400" style="width:${pct.toFixed(1)}%"></div></div>
+                  </td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>`);
+}
+
+function parseProm(text) {
+  const out = []; let help='', type='';
+  for (const line of (text||'').split('\n')) {
+    if (line.startsWith('# HELP ')) { help = line.slice(7).replace(/^\S+\s/,''); }
+    else if (line.startsWith('# TYPE ')) { type=(line.split(' ')[3]||'').trim(); }
+    else if (line && !line.startsWith('#')) {
+      const m = line.match(/^([^{}\s]+)(\{[^}]*\})?\s+([\d.eE+\-NaInfinity]+)/);
+      if (m) { out.push({name:m[1],labels:m[2]||'',value:m[3],num:parseFloat(m[3]),help,type}); help=''; }
+    }
+  }
+  return out;
+}
+
+// ═══ INIT ═══
+renderSidebar();
+navigate('overview');
+schedNext();
+
+function schedNext() {
+  if (timer) clearTimeout(timer);
+  if (!autoRef) return;
+  timer = setTimeout(() => doRefresh().then(schedNext), ivMs);
+}
+</script>
+</body>
+</html>

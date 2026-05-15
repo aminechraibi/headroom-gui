@@ -1,0 +1,6 @@
+node_modules/
+.server.pid
+.server.log
+.server.port
+*.log
+*.pid

@@ -1,0 +1,17 @@
+{
+  "name": "headroom-gui",
+  "version": "1.0.0",
+  "description": "Monitoring dashboard for the headroom MCP compression server",
+  "bin": {
+    "headroom-gui": "./bin/cli.js"
+  },
+  "files": [
+    "bin/",
+    "index.html"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": ["headroom", "mcp", "monitor", "dashboard", "compression"],
+  "license": "MIT"
+}
