@@ -1,6 +1,6 @@
 {
   "name": "headroom-gui",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Monitoring dashboard for the headroom MCP compression server",
   "homepage": "https://github.com/aminechraibi/headroom-gui#readme",
   "repository": {
@@ -15,7 +15,8 @@
   },
   "files": [
     "bin/",
-    "index.html"
+    "index.html",
+    "assets/"
   ],
   "engines": {
     "node": ">=18"

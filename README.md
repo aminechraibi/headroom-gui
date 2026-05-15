@@ -2,6 +2,8 @@
 
 A monitoring dashboard for [Headroom](https://github.com/chopratejas/headroom) — the AI-agent context compression proxy that reduces LLM token usage by 60–95%.
 
+![headroom-gui dashboard](assets/screenshot.png)
+
 ## What is Headroom?
 
 Headroom sits between your AI agent and the LLM. It intercepts tool call results and compresses them before they reach the model, cutting costs and extending effective context windows. Compression is reversible (CCR mode) — the original is cached for 5 minutes and retrieved on demand.
